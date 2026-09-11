@@ -53,4 +53,4 @@ def meal():
     if result:
         return result
 
-    return {"message": f"{datetime.today().strftime('%Y-%m-%d')} 메뉴를 찾을 수 없습니다."}
+    return {"message": f"{datetime.today().strftime('%Y-%m-%d')} 메뉴를 찾을 수 없습니다."}

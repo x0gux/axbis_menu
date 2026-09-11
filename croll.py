@@ -50,7 +50,8 @@ from paddleocr import PaddleOCR
 BASE_URL = "https://www.g5w.co.kr"
 BOARD_URL = "https://www.g5w.co.kr/home/m_board.php?ps_db=b7"
 
-OUTPUT_DIR = "meal_output"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(BASE_DIR, "meal_output")
 
 HEADERS = {
     "User-Agent": (
