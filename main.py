@@ -4,9 +4,10 @@ from datetime import datetime
 import json
 import os
 
-import croll
-
 app = FastAPI()
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(BASE_DIR, "meal_output")
 
 
 @app.get("/")
@@ -17,19 +18,22 @@ def root():
 def _load_today_menu():
     """menu.json에서 오늘 날짜 메뉴를 찾아 반환.
     없으면 None."""
-    json_path = os.path.join(croll.OUTPUT_DIR, "menu.json")
+    json_path = os.path.join(OUTPUT_DIR, "menu.json")
 
     if not os.path.exists(json_path):
         return None
 
-    with open(json_path, "r", encoding="utf-8") as f:
-        menu_data = json.load(f)
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            menu_data = json.load(f)
+    except Exception:
+        return None
 
     today = datetime.today().strftime("%Y-%m-%d")
     daily_menus = menu_data.get("daily_menus", {})
 
     for date_key, menu in daily_menus.items():
-        if menu["date"] == today:
+        if menu.get("date") == today:
             return {"date_key": date_key, **menu}
 
     return None
@@ -42,11 +46,14 @@ def meal():
     if result:
         return result
 
-    # 2) 없으면 크롤링 실행
+    # 2) 없으면 크롤링 실행 (로컬 환경 등 크롤러 라이브러리가 있을 때만)
     try:
+        import croll
         croll.main()
     except Exception as e:
-        return {"message": f"크롤링 실패: {e}"}
+        return {
+            "message": f"오늘({datetime.today().strftime('%Y-%m-%d')}) 메뉴가 없으며, 자동 크롤링을 실행할 수 없습니다: {e}"
+        }
 
     # 3) 크롤링 후 다시 찾기
     result = _load_today_menu()
