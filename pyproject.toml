@@ -1,2 +1,16 @@
+[project]
+name = "axbis-menu"
+version = "0.1.0"
+description = "FastAPI backend for menu"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "requests",
+    "beautifulsoup4",
+    "pillow",
+]
+
 [tool.vercel]
 entrypoint = "main:app"
