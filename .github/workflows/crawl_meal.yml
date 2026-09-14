@@ -12,6 +12,9 @@ permissions:
 jobs:
   crawl:
     runs-on: self-hosted
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout repository
@@ -40,5 +43,6 @@ jobs:
             echo "No changes in meal_output to commit."
           else
             git commit -m "chore(auto): update meal menu data [$(date +'%Y-%m-%d')]"
-            git push
+            git pull --rebase origin main
+            git push origin main
           fi
