@@ -15,9 +15,8 @@ def root():
     return {"message": "yeah"}
 
 
-def _load_today_menu():
-    """menu.json에서 오늘 날짜 메뉴를 찾아 반환.
-    없으면 None."""
+def _load_weekly_menu():
+    """menu.json 파일 전체(주간 메뉴)를 읽어 반환합니다."""
     json_path = os.path.join(OUTPUT_DIR, "menu.json")
 
     if not os.path.exists(json_path):
@@ -25,39 +24,30 @@ def _load_today_menu():
 
     try:
         with open(json_path, "r", encoding="utf-8") as f:
-            menu_data = json.load(f)
+            return json.load(f)
     except Exception:
         return None
-
-    today = datetime.today().strftime("%Y-%m-%d")
-    daily_menus = menu_data.get("daily_menus", {})
-
-    for date_key, menu in daily_menus.items():
-        if menu.get("date") == today:
-            return {"date_key": date_key, **menu}
-
-    return None
 
 
 @app.get("/meal")
 def meal():
-    # 1) 기존 데이터에서 오늘 메뉴 찾기
-    result = _load_today_menu()
+    # 1) 전체 주간 메뉴 데이터 확인
+    result = _load_weekly_menu()
     if result:
         return result
 
-    # 2) 없으면 크롤링 실행 (로컬 환경 등 크롤러 라이브러리가 있을 때만)
+    # 2) 없으면 크롤링 실행
     try:
         import croll
         croll.main()
     except Exception as e:
         return {
-            "message": f"오늘({datetime.today().strftime('%Y-%m-%d')}) 메뉴가 없으며, 자동 크롤링을 실행할 수 없습니다: {e}"
+            "message": f"메뉴가 없으며, 자동 크롤링을 실행할 수 없습니다: {e}"
         }
 
-    # 3) 크롤링 후 다시 찾기
-    result = _load_today_menu()
+    # 3) 크롤링 후 다시 전체 데이터 읽기
+    result = _load_weekly_menu()
     if result:
         return result
 
-    return {"message": f"{datetime.today().strftime('%Y-%m-%d')} 메뉴를 찾을 수 없습니다."}
+    return {"message": "메뉴를 찾을 수 없습니다."}
