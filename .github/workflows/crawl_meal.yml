@@ -2,7 +2,7 @@ name: Crawl Meal Menu
 
 on:
   schedule:
-    - cron: '12 1 * * 1-5'  # UTC 00:43 = KST 09:43
+    - cron: '0 1 * * 1-5'  # UTC 00:43 = KST 09:43
   workflow_dispatch: # GitHub 웹 UI의 Actions 탭에서 버튼 클릭으로 수동 실행 지원
 
 permissions:
