@@ -153,6 +153,65 @@ def _weekday_from_date(year, month, day):
         return None
 
 
+def _parse_date_component(year_str, month_str, day_str):
+    """'26'/'2026' 형식의 연도 문자열을 포함해 datetime.date로 변환한다."""
+    try:
+        y = int(year_str)
+        if y < 100:
+            y += 2000
+        return datetime.date(y, int(month_str), int(day_str))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_period_dates(period_str):
+    """period 문자열에서 (시작일, 종료일)을 datetime.date로 반환한다.
+
+    예: '26.10.12~10.16' → (2026-10-12, 2026-10-16)
+    종료일이 파싱되지 않으면 (시작일, None).
+    """
+    if not period_str:
+        return None, None
+
+    text = _normalize_ocr_text(period_str).replace(" ", "")
+
+    start_match = re.search(r"(\d{2,4})[.\-](\d{1,2})[.\-](\d{1,2})", text)
+    if not start_match:
+        return None, None
+
+    start = _parse_date_component(
+        start_match.group(1),
+        start_match.group(2),
+        start_match.group(3),
+    )
+    if start is None:
+        return None, None
+
+    rest = text[start_match.end():]
+    end_match = re.search(r"(?:(\d{2,4})[.\-])?(\d{1,2})[.\-](\d{1,2})", rest)
+    if not end_match:
+        return start, None
+
+    if end_match.group(1):
+        end = _parse_date_component(
+            end_match.group(1),
+            end_match.group(2),
+            end_match.group(3),
+        )
+    else:
+        # 연도 생략 시 시작일의 연도를 따른다
+        end = _parse_date_component(
+            str(start.year),
+            end_match.group(2),
+            end_match.group(3),
+        )
+
+    if end is not None and end < start:
+        end = None
+
+    return start, end
+
+
 def make_output_dir():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -718,6 +777,21 @@ def extract_period(
     return ""
 
 
+def _year_from_post_date(post_date_str):
+    """게시물 작성일("2026-10-12" 형식)에서 연도를 추출한다.
+
+    파싱에 실패하면 None을 반환하고, parse_daily_menus가
+    기간 문자열/오늘 날짜로 대체 추정한다.
+    """
+    if not post_date_str:
+        return None
+
+    try:
+        return datetime.date.fromisoformat(str(post_date_str).strip()).year
+    except (TypeError, ValueError):
+        return None
+
+
 # ============================================================
 # 8. 날짜별 메뉴 파싱
 # ============================================================
@@ -816,7 +890,7 @@ def _find_course_label(line):
     return None
 
 
-def parse_daily_menus(ocr_items, period_str=""):
+def parse_daily_menus(ocr_items, period_str="", year=None):
     """OCR 아이템(text, x, y)을 날짜별 구조화 메뉴로 파싱한다.
 
     메뉴 이미지 구조:
@@ -836,16 +910,17 @@ def parse_daily_menus(ocr_items, period_str=""):
     if not ocr_items:
         return {}
 
-    # ----- 연도 추정 (기간 문자열에서) -----
-    # 요일이 빠진 날짜에서 weekday를 도출하려면 파싱 초기에 연도가 필요하다.
-    year = 2026
-    year_match = re.search(r"(\d{4})", period_str)
-    if year_match:
-        year = int(year_match.group(1))
-    elif re.search(r"(\d{2})\.\d{2}\.\d{2}", period_str):
-        y2 = re.search(r"(\d{2})\.\d{2}\.\d{2}", period_str)
-        if y2:
-            year = 2000 + int(y2.group(1))
+    # ----- 연도 결정: 파라미터 > 기간 문자열 > 오늘 -----
+    if year is None:
+        year_match = re.search(r"(\d{4})", period_str)
+        if year_match:
+            year = int(year_match.group(1))
+        else:
+            y2 = re.search(r"(\d{2})\.\d{2}\.\d{2}", period_str)
+            if y2:
+                year = 2000 + int(y2.group(1))
+            else:
+                year = datetime.date.today().year
 
     def _interp_x(item, match_start, match_len, text_len):
         """박스 내 문자 오프셋 비례로 매치 중심의 x 좌표를 보간한다.
@@ -970,6 +1045,138 @@ def parse_daily_menus(ocr_items, period_str=""):
             (entry["x"], entry["month"], entry["day"], weekday)
         )
 
+    # ----- fallback 1: 요일 헤더 앵커로 빠진 열 복원 -----
+    # 날짜 앵커 수가 요일 헤더 수보다 적고, 각 날짜 앵커가 서로 다른
+    # 헤더에 1:1로 대응되면, 매칭되지 않은 헤더 위치를 '날짜 미지정'
+    # 열 앵커로 추가한다. (fallback 2가 날짜를 채운다)
+    if day_header_xs and len(day_columns) < len(day_header_xs):
+        headers_sorted = sorted(day_header_xs)
+        used_headers = set()
+        snapped = []  # [(anchor_x, month, day, weekday)]
+
+        for col_x, month, day, weekday in day_columns:
+            best_h, best_d = None, float("inf")
+            for hx in headers_sorted:
+                if hx in used_headers:
+                    continue
+                dist = abs(hx - col_x)
+                if dist < best_d:
+                    best_h, best_d = hx, dist
+            if best_h is not None:
+                used_headers.add(best_h)
+                snapped.append((best_h, month, day, weekday))
+            else:
+                snapped.append((col_x, month, day, weekday))
+
+        for hx in headers_sorted:
+            if hx not in used_headers:
+                snapped.append((hx, None, None, None))
+
+        if len(snapped) > len(day_columns):
+            day_columns = snapped
+            day_columns.sort(key=lambda c: c[0])
+
+    # ----- fallback 2: period 역산으로 누락 열/날짜 복원 -----
+    # 우선순위: 날짜 앵커가 항상 이긴다. period는 앵커가 없는 열/날짜만 채우고,
+    # 기존 앵커의 날짜와 충돌하면 앵커를 유지한다.
+    known_columns = [
+        (col_x, month, day, weekday)
+        for col_x, month, day, weekday in day_columns
+        if month is not None
+    ]
+    unknown_columns = [
+        (col_x, month, day, weekday)
+        for col_x, month, day, weekday in day_columns
+        if month is None
+    ]
+
+    period_start, period_end = _parse_period_dates(period_str)
+
+    if len(known_columns) >= 2 and period_start is not None:
+        # 기간 내 모든 날짜 (최대 7일, 종료일 없으면 시작일+4일 = 월~금)
+        if period_end is None:
+            period_end = period_start + datetime.timedelta(days=4)
+
+        ref = period_start
+        period_days = []
+        cursor = period_start
+        while cursor <= period_end and len(period_days) < 7:
+            period_days.append(cursor)
+            cursor += datetime.timedelta(days=1)
+
+        # 알려진 앵커 2개로 (날짜 오프셋 → x) 선형 보간 계수를 구한다
+        fitted_points = [
+            ((datetime.date(year, month, day) - ref).days, col_x)
+            for col_x, month, day, _ in known_columns
+            if period_start <= datetime.date(year, month, day) <= period_end
+        ]
+        fitted_points.sort()
+
+        if len(fitted_points) >= 2:
+            off1, x1 = fitted_points[0]
+            off2, x2 = fitted_points[-1]
+            if off2 > off1 and x2 > x1:
+                slope = (x2 - x1) / (off2 - off1)
+                intercept = x1 - slope * off1
+
+                existing_dates = {
+                    (month, day) for _, month, day, _ in known_columns
+                }
+                for period_date in period_days:
+                    if (period_date.month, period_date.day) in existing_dates:
+                        continue
+                    fitted_x = intercept + slope * (
+                        (period_date - ref).days
+                    )
+                    day_columns.append((
+                        fitted_x,
+                        period_date.month,
+                        period_date.day,
+                        _WEEKDAY_INDEX[period_date.weekday()],
+                    ))
+
+                day_columns.sort(key=lambda c: c[0])
+
+    elif unknown_columns and period_start is not None:
+        # 헤더 앵커로 만들어진 '날짜 미지정' 열: x순(좌→우)으로
+        # period 시작일부터 순서대로 채운다. (이미 앵커가 사용한 날짜 제외)
+        if period_end is None:
+            period_end = period_start + datetime.timedelta(days=4)
+
+        existing_dates = {
+            (month, day) for _, month, day, _ in known_columns
+        }
+        period_days = []
+        cursor = period_start
+        while cursor <= period_end and len(period_days) < 7:
+            if (cursor.month, cursor.day) not in existing_dates:
+                period_days.append(cursor)
+            cursor += datetime.timedelta(days=1)
+
+            unknown_columns.sort(key=lambda c: c[0])
+        for idx, (col_x, _, _, _) in enumerate(unknown_columns):
+            if idx >= len(period_days):
+                # 채울 날짜가 부족하면 해당 열은 폐기한다
+                day_columns = [
+                    c for c in day_columns if not (
+                        c[0] == col_x and c[1] is None
+                    )
+                ]
+                continue
+            fill_date = period_days[idx]
+            for i, (cx, month, day, weekday) in enumerate(day_columns):
+                if cx == col_x and month is None:
+                    day_columns[i] = (
+                        col_x,
+                        fill_date.month,
+                        fill_date.day,
+                        _WEEKDAY_INDEX[fill_date.weekday()],
+                    )
+                    break
+
+    # 잔존하는 '날짜 미지정' 열 정리 (선형 보간으로 대체되었거나 채우기 실패한 열)
+    day_columns = [c for c in day_columns if c[1] is not None]
+
     # 열(요일) 정렬 (x 기준)
     day_columns.sort(key=lambda c: c[0])
 
@@ -977,20 +1184,28 @@ def parse_daily_menus(ocr_items, period_str=""):
         # 날짜를 찾지 못했으면 빈 결과
         return {}
 
-    # ----- 각 아이템을 가장 가까운 열에 배정 -----
+    # ----- 각 아이템을 열 구간(중간점 경계)에 배정 -----
 
     col_centers = [c[0] for c in day_columns]
 
+    col_bounds = []
+    for i in range(len(col_centers)):
+        if i == 0:
+            bound_start = float("-inf")
+        else:
+            bound_start = (col_centers[i - 1] + col_centers[i]) / 2
+        if i < len(col_centers) - 1:
+            bound_end = (col_centers[i] + col_centers[i + 1]) / 2
+        else:
+            bound_end = float("inf")
+        col_bounds.append((bound_start, bound_end))
+
     def nearest_col(x):
-        """x 좌표에 가장 가까운 열 인덱스"""
-        min_dist = float("inf")
-        best = 0
-        for i, cx in enumerate(col_centers):
-            dist = abs(x - cx)
-            if dist < min_dist:
-                min_dist = dist
-                best = i
-        return best
+        """x 좌표가 속하는 열 구간(인접 앵커 중간점 경계)의 인덱스"""
+        for i, (bound_start, bound_end) in enumerate(col_bounds):
+            if bound_start <= x < bound_end:
+                return i
+        return len(col_centers) - 1
 
     # ----- 코스 행 경계 -----
     # 코스 라벨의 y 좌표 중간점으로 구간을 나눈다
@@ -1360,7 +1575,8 @@ def main():
 
     daily_menus = parse_daily_menus(
         all_ocr_items,
-        period
+        period,
+        year=_year_from_post_date(post.get("date")),
     )
 
     # ----------------------------------------

@@ -106,3 +106,103 @@ def test_is_weekday_token():
     assert _is_weekday_token("화")
     assert not _is_weekday_token("10월12일")
     assert not _is_weekday_token("콩나물국")
+
+
+# ------------------------------------------------------------
+# (T2) fallback: 요일 헤더 5개 + 날짜 앵커 2개 → 5열 복원
+# ------------------------------------------------------------
+
+def test_fallback_restores_missing_columns_from_headers_and_period():
+    items = [
+        # 요일 헤더 병합 박스 (x1=0, x2=500, MON~FRI)
+        {
+            "text": "MON TUE WED THU FRI",
+            "x": 250, "y": -10, "x1": 0, "x2": 500, "text_len": 19,
+        },
+        # 감지된 날짜 앵커: 화(10-13), 금(10-16)
+        {"text": "10월13일 (화)", "x": 150, "y": 0, "x1": 130, "x2": 170, "text_len": 10},
+        {"text": "10월16일 (금)", "x": 450, "y": 0, "x1": 430, "x2": 470, "text_len": 10},
+        {"text": "A코스", "x": 30, "y": 50, "x1": 30, "x2": 60, "text_len": 3},
+        {"text": "흑미밥", "x": 150, "y": 100, "x1": 150, "x2": 190, "text_len": 3},
+    ]
+    result = parse_daily_menus(items, period_str="26.10.12~10.16")
+
+    # 주간 5일이 모두 복원되어야 한다
+    expected_keys = {
+        "2026-10-12 (월)",
+        "2026-10-13 (화)",
+        "2026-10-14 (수)",
+        "2026-10-15 (목)",
+        "2026-10-16 (금)",
+    }
+    assert set(result.keys()) == expected_keys
+
+    # 기존 앵커의 메뉴 배정은 불변
+    assert result["2026-10-13 (화)"]["courses"]["A코스"] == ["흑미밥"]
+
+
+# ------------------------------------------------------------
+# (T2) fallback: 앵커 2개 + period → 누락 3열 선형 보간 복원
+# ------------------------------------------------------------
+
+def test_fallback_interpolates_missing_columns_from_period():
+    items = [
+        # 헤더 없이 날짜 앵커 2개만 존재 (13일, 16일)
+        {"text": "10월13일 (화)", "x": 150, "y": 0, "x1": 130, "x2": 170, "text_len": 10},
+        {"text": "10월16일 (금)", "x": 450, "y": 0, "x1": 430, "x2": 470, "text_len": 10},
+        {"text": "A코스", "x": 30, "y": 50, "x1": 30, "x2": 60, "text_len": 3},
+    ]
+    result = parse_daily_menus(items, period_str="26.10.12~10.16")
+
+    expected_keys = {
+        "2026-10-12 (월)",
+        "2026-10-13 (화)",
+        "2026-10-14 (수)",
+        "2026-10-15 (목)",
+        "2026-10-16 (금)",
+    }
+    assert set(result.keys()) == expected_keys
+    # 기존 앵커는 불변
+    assert result["2026-10-13 (화)"]["date"] == "2026-10-13"
+    assert result["2026-10-16 (금)"]["date"] == "2026-10-16"
+
+
+# ------------------------------------------------------------
+# (T2) 중간점 열 경계 배정
+# ------------------------------------------------------------
+
+def test_midpoint_column_boundary_assignment():
+    items = [
+        {"text": "10월13일 (화)", "x": 100, "y": 0, "x1": 80, "x2": 120, "text_len": 10},
+        {"text": "10월16일 (금)", "x": 300, "y": 0, "x1": 280, "x2": 320, "text_len": 10},
+        {"text": "A코스", "x": 30, "y": 50, "x1": 30, "x2": 60, "text_len": 3},
+        # 경계(중간점 200) 좌우에 위치한 메뉴
+        {"text": "흑미밥", "x": 190, "y": 100, "x1": 190, "x2": 230, "text_len": 3},
+        {"text": "제육볶음", "x": 210, "y": 100, "x1": 210, "x2": 250, "text_len": 4},
+    ]
+    # period를 주지 않아 fallback 없이 2열만 사용
+    result = parse_daily_menus(items)
+
+    assert set(result.keys()) == {"2026-10-13 (화)", "2026-10-16 (금)"}
+    assert result["2026-10-13 (화)"]["courses"]["A코스"] == ["흑미밥"]
+    assert result["2026-10-16 (금)"]["courses"]["A코스"] == ["제육볶음"]
+
+
+# ------------------------------------------------------------
+# (T2) period 파서
+# ------------------------------------------------------------
+
+def test_parse_period_dates():
+    from croll import _parse_period_dates
+    import datetime as dt
+
+    start, end = _parse_period_dates("26.10.12~10.16")
+    assert start == dt.date(2026, 10, 12)
+    assert end == dt.date(2026, 10, 16)
+
+    start, end = _parse_period_dates("2026.10.12~2026.10.16")
+    assert start == dt.date(2026, 10, 12)
+    assert end == dt.date(2026, 10, 16)
+
+    start, end = _parse_period_dates("")
+    assert start is None and end is None
