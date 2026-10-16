@@ -792,6 +792,63 @@ def _year_from_post_date(post_date_str):
         return None
 
 
+def build_ocr_debug(post, images_with_items, period_str=""):
+    """OCR 원본 좌표 아이템을 디버그 페이로드로 구조화한다.
+
+    meal_output/ocr_debug.json의 단일 진실 원본이 되며,
+    회귀 테스트 픽스처(tests/fixtures/ocr_items.json)의 출처이다.
+    이 데이터는 menu.json(/meal API 응답)에는 포함하지 않는다.
+    (API 페이로드 비대 방지)
+
+    - post: 게시물 정보 {title, date, ...}
+    - images_with_items: [{"url":..., "items":[{text,x,y,x1,x2,text_len},...]}]
+    - period_str: extract_period 결과
+    """
+    return {
+        "post_title": post.get("title", ""),
+        "post_date": post.get("date", ""),
+        "period": period_str,
+        "captured_at": datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat(),
+        "images": [
+            {
+                "url": img.get("url", ""),
+                "items": img.get("items", []),
+            }
+            for img in images_with_items
+        ],
+    }
+
+
+def save_ocr_debug(debug_payload):
+    """디버그 페이로드를 meal_output/ocr_debug.json에 저장한다.
+
+    매 실행 덮어쓴다. 반환값은 저장 경로.
+    """
+    make_output_dir()
+
+    json_path = os.path.join(
+        OUTPUT_DIR,
+        "ocr_debug.json"
+    )
+
+    with open(
+        json_path,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            debug_payload,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    return json_path
+
+
 # ============================================================
 # 8. 날짜별 메뉴 파싱
 # ============================================================
@@ -1495,6 +1552,7 @@ def main():
 
     all_ocr_items = []
     all_lines = []
+    images_with_items = []
 
     # ----------------------------------------
     # 이미지별 OCR
@@ -1520,6 +1578,12 @@ def main():
             all_ocr_items.extend(
                 ocr_items
             )
+
+            # 디버그 페이로드용 이미지별 원본 좌표 보관
+            images_with_items.append({
+                "url": image_info.get("url", ""),
+                "items": ocr_items,
+            })
 
             lines = group_ocr_lines(
                 ocr_items
@@ -1564,6 +1628,18 @@ def main():
     period = extract_period(
         alt_text,
         all_lines
+    )
+
+    # ----------------------------------------
+    # OCR 원본 좌표 디버그 저장 (회귀 픽스처 원본)
+    # ----------------------------------------
+
+    debug_path = save_ocr_debug(
+        build_ocr_debug(post, images_with_items, period)
+    )
+
+    print(
+        f"OCR 디버그 저장: {debug_path}"
     )
 
     # ----------------------------------------

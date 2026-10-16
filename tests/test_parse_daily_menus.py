@@ -109,6 +109,47 @@ def test_is_weekday_token():
 
 
 # ------------------------------------------------------------
+# (T3) OCR 디버그 페이로드 빌더
+# ------------------------------------------------------------
+
+def test_build_ocr_debug_structure():
+    from croll import build_ocr_debug
+
+    post = {
+        "title": "구내식 메뉴(26.10.12~16)",
+        "date": "2026-10-12",
+    }
+    images = [
+        {
+            "url": "https://example.com/menu.jpg",
+            "items": [
+                {"text": "흑미밥", "x": 1.0, "y": 2.0,
+                 "x1": 0.0, "x2": 2.0, "text_len": 3},
+            ],
+        },
+    ]
+
+    payload = build_ocr_debug(post, images, period_str="26.10.12~10.16")
+
+    assert payload["post_title"] == "구내식 메뉴(26.10.12~16)"
+    assert payload["post_date"] == "2026-10-12"
+    assert payload["period"] == "26.10.12~10.16"
+    assert payload["images"][0]["url"] == "https://example.com/menu.jpg"
+    assert payload["images"][0]["items"][0]["text"] == "흑미밥"
+    assert "captured_at" in payload
+
+
+def test_build_ocr_debug_defaults():
+    from croll import build_ocr_debug
+
+    payload = build_ocr_debug({}, [])
+
+    assert payload["post_title"] == ""
+    assert payload["period"] == ""
+    assert payload["images"] == []
+
+
+# ------------------------------------------------------------
 # (T2) fallback: 요일 헤더 5개 + 날짜 앵커 2개 → 5열 복원
 # ------------------------------------------------------------
 
