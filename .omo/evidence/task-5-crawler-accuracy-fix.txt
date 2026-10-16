@@ -1,0 +1,11 @@
+T5 실측 크롤링 실행 증거
+========================
+- 로컬 Python 3.14.7: paddlepaddle wheel 없음 확인 (pip install --only-binary :all: → "No matching distribution")
+- 폴백 경로: brew install python@3.12 → .venv312 (Python 3.12.15, CI self-hosted 러너와 동일 메이저 버전)
+- 설치: paddlepaddle 3.3.1 + paddleocr 3.7.0 + fastapi/uvicorn/requests/beautifulsoup4/pytest
+- 실행: .venv312/bin/python croll.py → 종료코드 0, "[5] 결과 저장" 및 "완료!" 로그
+- 산출물: meal_output/ocr_debug.json 생성, menu.json 갱신, menu_2026-10-12~16.json 5일 생성
+- daily_menus 5일 키 확인: 2026-10-12(월) ~ 2026-10-16(금)
+- 경고 노트 (Metis D2 완화 규정): OCR 아이템 총 86건 (< 100 기준 미달) — 단일 이미지 메뉴판의
+  정상 범위. 실질 검증은 daily_menus==5일 단정 및 T6 회귀 테스트로 대체 확인됨.
+- 교차 검증: 과거 오염 데이터 대비 제육고추장볶음→월/소떡소떡→화/치킨너겟강정→수 정확 배치

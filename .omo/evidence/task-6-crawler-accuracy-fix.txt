@@ -1,0 +1,4 @@
+T6 픽스처 회귀 테스트 증거
+========================
+- .venv312/bin/python -m pytest tests/ -q → 23 passed (T6 4건: 5일 복원 / 오염 토큰 0건 / A코스 1~15 / 빈 날짜 없음)
+- fixture: tests/fixtures/ocr_items.json (ocr_debug.json 복사본, period=26.10.12~10.16, post_date=2026-10-12에서 year 도출)
