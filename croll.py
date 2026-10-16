@@ -3,6 +3,7 @@
 import os
 import re
 import json
+import datetime
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -40,7 +41,12 @@ def _patch_paddle_onednn():
 _patch_paddle_onednn()
 
 # pyrefly: ignore [missing-import]
-from paddleocr import PaddleOCR
+try:
+    from paddleocr import PaddleOCR
+except Exception:
+    # paddleocr 미설치 환경에서도 순수 파싱 함수들을 import해
+    # 단위/회귀 테스트를 실행할 수 있도록 격리한다.
+    PaddleOCR = None
 
 
 # ============================================================
@@ -91,6 +97,60 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
+
+
+# OCR 정규화용 전각 → 반각 치환 테이블
+_FULLWIDTH_TRANS = str.maketrans({
+    "（": "(",
+    "）": ")",
+    "　": " ",
+})
+
+
+def _normalize_ocr_text(text):
+    """OCR 텍스트를 날짜/토큰 매칭에 적합한 정규형으로 변환한다.
+
+    - 전각 괄호/공백 → 반각
+    - 숫자와 월/일 사이 공백 제거 ('10 월 1 2 일' → '10월12일')
+    - 다중 공백 축약
+    """
+    if not text:
+        return ""
+
+    text = text.translate(_FULLWIDTH_TRANS)
+    text = re.sub(r"\s+", " ", text)
+    # OCR이 숫자를 분리한 경우 접착 ('1 0' → '10')
+    text = re.sub(r"(\d)\s+(?=\d)", r"\1", text)
+    # 숫자와 월/일 경계의 공백 제거
+    text = re.sub(r"(\d)\s*월", r"\1월", text)
+    text = re.sub(r"월\s*(\d)", r"월\1", text)
+    text = re.sub(r"(\d)\s*일", r"\1일", text)
+
+    return text.strip()
+
+
+# 날짜 정규식: MM월DD일 (요일) — 요일/괄호는 선택
+_DATE_PATTERN = re.compile(
+    r"(\d{1,2})\s*월\s*(\d{1,2})\s*일(?:\s*[\(（]?\s*([월화수목금토일])\s*[\)）])?"
+)
+
+# 요일 토큰 정규식: 괄호 요일 또는 단독 요일 한 글자
+_WEEKDAY_TOKEN_PATTERN = re.compile(r"^[\(（]?[월화수목금토일][\)）]?$")
+
+# 요일 헤더 정규식: MON ~ SUN 단어 경계 매칭
+_DAY_HEADER_PATTERN = re.compile(
+    r"\b(MON|TUE|WED|THU|FRI|SAT|SUN)\b"
+)
+
+_WEEKDAY_INDEX = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
+
+
+def _weekday_from_date(year, month, day):
+    """날짜가 유효하면 한글 요일을, 아니면 None을 반환한다."""
+    try:
+        return _WEEKDAY_INDEX[datetime.date(year, month, day).weekday()]
+    except Exception:
+        return None
 
 
 def make_output_dir():
@@ -470,20 +530,22 @@ def run_ocr(
             ):
                 box = rec_boxes[i]
 
-            # 좌표 계산
+            # 좌표 계산: 박스 중심(x) + 경계(x1, x2) 저장
+            # 병합된 텍스트(여러 날짜/헤더)의 위치 보간에 x1/x2가 필요하다.
             x = 0
             y = 0
+            x1 = 0
+            x2 = 0
 
             if box is not None:
 
                 try:
-                    x = float(
-                        box[0]
-                    )
-
-                    y = float(
-                        box[1]
-                    )
+                    x1 = float(box[0])
+                    x2 = float(box[2]) if len(box) >= 4 else x1
+                    x = (x1 + x2) / 2
+                    y = float(box[1])
+                    if len(box) >= 4:
+                        y = (float(box[1]) + float(box[3])) / 2
 
                 except Exception:
                     pass
@@ -491,7 +553,10 @@ def run_ocr(
             texts.append({
                 "text": text,
                 "x": x,
-                "y": y
+                "y": y,
+                "x1": x1,
+                "x2": x2,
+                "text_len": len(text),
             })
 
     # 위에서 아래
@@ -660,20 +725,46 @@ def extract_period(
 def _find_date_line(line):
     """OCR 줄에서 날짜 정보를 추출.
     예: '08월31일 (월)', '9월1일 (화)', '09월2일 (수)' 등
-    반환: (month, day, weekday) 또는 None
+    OCR 공백 오차는 _normalize_ocr_text로 흡수한다.
+    반환: (month, day, weekday) 또는 None. 요일이 없으면 None.
     """
-    # 패턴: MM월DD일 (요일)
-    m = re.search(
-        r"(\d{1,2})월\s*(\d{1,2})일\s*\(?([월화수목금토일])\)?",
-        line
-    )
+    normalized = _normalize_ocr_text(line)
+    m = _DATE_PATTERN.search(normalized)
     if m:
         return (
             int(m.group(1)),
             int(m.group(2)),
-            m.group(3)
+            m.group(3) if m.group(3) else None,
         )
     return None
+
+
+def _find_all_dates(line):
+    """하나의 OCR 텍스트에서 모든 날짜를 등장 순서대로 추출한다.
+
+    하나의 OCR 박스에 여러 날짜가 병합된 경우를 다룬다.
+    예: '10월12일 (월) 10월13일(화)' → [(0, 10, 10, 12, '월'), (12, 10, 10, 13, '화')]
+    반환: [(match_start, match_len, month, day, weekday_or_None), ...]
+    """
+    normalized = _normalize_ocr_text(line)
+    results = []
+    for m in _DATE_PATTERN.finditer(normalized):
+        results.append((
+            m.start(),
+            len(m.group(0)),
+            int(m.group(1)),
+            int(m.group(2)),
+            m.group(3) if m.group(3) else None,
+        ))
+    return results
+
+
+def _is_weekday_token(text):
+    """괄호 요일 '(월)' 또는 단독 요일 '월' 토큰인지 판별한다.
+    이런 토큰은 메뉴 항목으로 유입되면 안 된다.
+    """
+    normalized = _normalize_ocr_text(text)
+    return bool(_WEEKDAY_TOKEN_PATTERN.match(normalized))
 
 
 def _find_day_header(line):
@@ -685,6 +776,22 @@ def _find_day_header(line):
         if key.upper() == upper:
             return val
     return None
+
+
+def _find_day_headers(line):
+    """하나의 OCR 텍스트에서 모든 영문 요일 헤더를 등장 순서대로 추출한다.
+
+    하나의 OCR 박스에 여러 헤더가 병합된 경우를 다룬다.
+    예: 'MON TUE WED THU FRI' → [(0, 3, '월'), (4, 3, '화'), ...]
+    반환: [(match_start, match_len, weekday_한글), ...]
+    """
+    normalized = _normalize_ocr_text(line)
+    results = []
+    for m in _DAY_HEADER_PATTERN.finditer(normalized):
+        weekday = DAY_KEYWORDS.get(m.group(1))
+        if weekday:
+            results.append((m.start(), len(m.group(0)), weekday))
+    return results
 
 
 def _find_course_label(line):
@@ -719,46 +826,92 @@ def parse_daily_menus(ocr_items, period_str=""):
     - 각 셀: 메뉴 아이템
 
     접근 방식:
-    1. x 좌표 기준으로 열(요일) 클러스터링
-    2. y 좌표 기준으로 행(코스) 클러스터링
-    3. 날짜 텍스트 → 해당 열과 매핑
-    4. 코스 라벨 → 해당 행과 매핑
+    1. 날짜 감지는 정규화된 텍스트로 수행하고, 하나의 OCR 박스에
+       여러 날짜/헤더가 병합된 경우 문자 오프셋 비례로 x를 보간한다.
+    2. 날짜 아이템들의 y를 클러스터링해 '날짜 행'을 식별하고,
+       행 내 날짜를 x순으로 정렬해 열 앵커로 사용한다.
+    3. y 좌표 기준으로 행(코스) 클러스터링
+    4. 각 메뉴 아이템을 열(날짜)×행(코스)에 배정
     """
     if not ocr_items:
         return {}
 
-    # ----- x 좌표 기준 열 클러스터링 -----
-    # 요일 헤더 / 날짜 라인으로 열 경계를 잡는다
+    # ----- 연도 추정 (기간 문자열에서) -----
+    # 요일이 빠진 날짜에서 weekday를 도출하려면 파싱 초기에 연도가 필요하다.
+    year = 2026
+    year_match = re.search(r"(\d{4})", period_str)
+    if year_match:
+        year = int(year_match.group(1))
+    elif re.search(r"(\d{2})\.\d{2}\.\d{2}", period_str):
+        y2 = re.search(r"(\d{2})\.\d{2}\.\d{2}", period_str)
+        if y2:
+            year = 2000 + int(y2.group(1))
 
-    day_columns = []   # [(x_center, month, day, weekday)]
-    course_rows = []   # [(y_center, course_name)]
-    menu_items = []    # 나머지 텍스트
+    def _interp_x(item, match_start, match_len, text_len):
+        """박스 내 문자 오프셋 비례로 매치 중심의 x 좌표를 보간한다.
+
+        하나의 박스에 여러 날짜/헤더가 병합된 경우에도
+        각 토큰이 서로 다른 x를 갖도록 한다.
+        """
+        x1 = float(item.get("x1", item.get("x", 0)) or 0)
+        x2 = float(item.get("x2", x1) or 0)
+        width = x2 - x1
+        frac = (match_start + match_len / 2) / max(text_len, 1)
+        frac = min(max(frac, 0.0), 1.0)
+        return x1 + width * frac
+
+    # ----- 아이템 분류 -----
+
+    date_entries = []   # [{"x","y","month","day","weekday"}]
+    day_header_xs = []  # 영문/한글 요일 헤더의 x (보조 앵커용)
+    course_rows = []    # [(y_center, course_name)]
+    menu_items = []     # 메뉴 후보 텍스트
 
     for item in ocr_items:
-        text = item["text"]
-        x = item["x"]
-        y = item["y"]
+        text = item.get("text", "")
+        x = float(item.get("x", 0) or 0)
+        y = float(item.get("y", 0) or 0)
 
-        # 날짜 감지
-        date_info = _find_date_line(text)
-        if date_info:
-            day_columns.append(
-                (x, date_info[0], date_info[1], date_info[2])
-            )
+        ntext = _normalize_ocr_text(text)
+
+        # 1) 단독 한글 요일 헤더 (괄호 없는 한 글자: '월')
+        if re.match(r"^[월화수목금토일]$", ntext):
+            day_header_xs.append(x)
             continue
 
-        # 요일 헤더 (MON, TUE 등) → 건너뜀
-        day_header = _find_day_header(text)
-        if day_header:
+        # 2) 영문 요일 헤더 (병합 박스 지원: 'MON TUE WED THU FRI')
+        headers = _find_day_headers(ntext)
+        if headers:
+            for hstart, hlen, _weekday in headers:
+                day_header_xs.append(
+                    _interp_x(item, hstart, hlen, len(ntext))
+                )
             continue
 
-        # 코스 라벨
+        # 3) 날짜 감지 (병합 박스에서 다중 날짜 지원)
+        date_matches = _find_all_dates(ntext)
+        if date_matches:
+            for mstart, mlen, month, day, weekday in date_matches:
+                date_entries.append({
+                    "x": _interp_x(item, mstart, mlen, len(ntext)),
+                    "y": y,
+                    "month": month,
+                    "day": day,
+                    "weekday": weekday,
+                })
+            continue
+
+        # 4) 괄호 요일 토큰 차단: '(월)', '화' 등은 메뉴가 아니다
+        if _is_weekday_token(ntext):
+            continue
+
+        # 5) 코스 라벨
         course = _find_course_label(text)
         if course:
             course_rows.append((y, course))
             continue
 
-        # 제목/상호명/원산지 등 비메뉴 텍스트 필터
+        # 6) 제목/상호명/원산지 등 비메뉴 텍스트 필터
         skip_patterns = [
             r"ELORA",
             r"in\s*garden",
@@ -790,6 +943,32 @@ def parse_daily_menus(ocr_items, period_str=""):
             continue
 
         menu_items.append(item)
+
+    # ----- 날짜 행 → 열 앵커 -----
+    # y가 가까운 날짜들이 한 행(주간 그리드의 날짜 줄)을 이룬다.
+    # 여러 이미지의 OCR 결과가 합쳐진 경우 같은 날짜 행이 중복될 수 있어
+    # (month, day) 기준으로 첫 등장(가장 위 행)만 남긴다.
+    date_entries.sort(key=lambda e: (e["y"], e["x"]))
+
+    seen_dates = set()
+    day_columns = []   # [(x_center, month, day, weekday)]
+
+    for entry in date_entries:
+        date_key = (entry["month"], entry["day"])
+        if date_key in seen_dates:
+            continue
+        seen_dates.add(date_key)
+
+        weekday = entry["weekday"] or _weekday_from_date(
+            year, entry["month"], entry["day"]
+        )
+        if weekday is None:
+            # 유효하지 않은 날짜(예: 13월)는 열로 만들지 않는다
+            continue
+
+        day_columns.append(
+            (entry["x"], entry["month"], entry["day"], weekday)
+        )
 
     # 열(요일) 정렬 (x 기준)
     day_columns.sort(key=lambda c: c[0])
@@ -847,16 +1026,6 @@ def parse_daily_menus(ocr_items, period_str=""):
         return course_boundaries[-1][2]
 
     # ----- 날짜별로 메뉴 모으기 -----
-
-    # 연도 추정 (기간 문자열에서)
-    year = 2026
-    year_match = re.search(r"(\d{4})", period_str)
-    if year_match:
-        year = int(year_match.group(1))
-    elif re.search(r"(\d{2})\.\d{2}\.\d{2}", period_str):
-        y2 = re.search(r"(\d{2})\.\d{2}\.\d{2}", period_str)
-        if y2:
-            year = 2000 + int(y2.group(1))
 
     daily_menus = {}
 
@@ -1067,6 +1236,12 @@ def save_result(
 # ============================================================
 
 def main():
+
+    if PaddleOCR is None:
+        raise RuntimeError(
+            "paddleocr가 설치되어 있지 않아 크롤링을 실행할 수 없습니다. "
+            "`python3 -m pip install paddlepaddle paddleocr` 후 다시 시도하세요."
+        )
 
     print()
     print("=" * 70)
