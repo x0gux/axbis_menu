@@ -150,6 +150,94 @@ def test_build_ocr_debug_defaults():
 
 
 # ------------------------------------------------------------
+# (T6) 실측 픽스처 통합 회귀 테스트: 5일 복원 + 오염 토큰 0건
+# 픽스처는 T5 실측 크롤링(meal_output/ocr_debug.json)에서 복사된다.
+# ------------------------------------------------------------
+
+import json
+import os
+import re
+
+import pytest
+
+FIXTURE_PATH = os.path.join(
+    os.path.dirname(__file__), "fixtures", "ocr_items.json"
+)
+
+
+def _load_fixture_items():
+    if not os.path.exists(FIXTURE_PATH):
+        pytest.skip("tests/fixtures/ocr_items.json 없음 - T5 실측 크롤링 선행 필요")
+
+    with open(FIXTURE_PATH, encoding="utf-8") as f:
+        fixture = json.load(f)
+
+    period = fixture.get("period", "")
+    post_date = fixture.get("post_date", "")
+    year = int(post_date[:4]) if post_date[:4].isdigit() else None
+
+    items = []
+    for img in fixture.get("images", []):
+        items.extend(img.get("items", []))
+
+    return items, period, year
+
+
+_DATE_TOKEN_RE = re.compile(r"\d{1,2}월\d{1,2}일")
+_WEEKDAY_TOKEN_RE = re.compile(r"^\(?[월화수목금토일]\)?$")
+
+
+def test_live_fixture_restores_full_week():
+    """과거 결함 회귀 감지: 주간 5일이 모두 날짜별로 생성되어야 한다."""
+    items, period, year = _load_fixture_items()
+
+    daily_menus = parse_daily_menus(items, period, year=year)
+
+    assert len(daily_menus) == 5, f"일자 수 이상: {sorted(daily_menus.keys())}"
+
+
+def test_live_fixture_no_contamination_tokens():
+    """과거 결함 회귀 감지: 날짜/요일 토큰이 메뉴로 유입되지 않아야 한다."""
+    items, period, year = _load_fixture_items()
+
+    daily_menus = parse_daily_menus(items, period, year=year)
+
+    for date_key, menu in daily_menus.items():
+        for course, names in menu["courses"].items():
+            for name in names:
+                assert not _DATE_TOKEN_RE.search(
+                    name
+                ), f"{date_key} 날짜 토큰 오염: {name!r}"
+                assert not _WEEKDAY_TOKEN_RE.match(
+                    name
+                ), f"{date_key} 요일 토큰 오염: {name!r}"
+
+
+def test_live_fixture_reasonable_course_sizes():
+    """비현실적인 흡수 감지: A코스 아이템 수 1~15 범위."""
+    items, period, year = _load_fixture_items()
+
+    daily_menus = parse_daily_menus(items, period, year=year)
+
+    for date_key, menu in daily_menus.items():
+        a_course = menu["courses"].get("A코스", [])
+        assert 1 <= len(
+            a_course
+        ) <= 15, f"{date_key} A코스 아이템 수 이상: {len(a_course)} ({a_course})"
+
+
+def test_live_fixture_no_empty_days():
+    """빈 날짜 없음: 각 날짜의 코스 아이템 총합 5 이상."""
+    items, period, year = _load_fixture_items()
+
+    daily_menus = parse_daily_menus(items, period, year=year)
+
+    for date_key, menu in daily_menus.items():
+        total = sum(len(v) for v in menu["courses"].values())
+        assert total >= 5, f"{date_key} 아이템 과소: {total}"
+
+
+# ------------------------------------------------------------
 # (T2) fallback: 요일 헤더 5개 + 날짜 앵커 2개 → 5열 복원
 # ------------------------------------------------------------
 
