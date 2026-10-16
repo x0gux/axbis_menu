@@ -134,8 +134,9 @@ _DATE_PATTERN = re.compile(
     r"(\d{1,2})\s*월\s*(\d{1,2})\s*일(?:\s*[\(（]?\s*([월화수목금토일])\s*[\)）])?"
 )
 
-# 요일 토큰 정규식: 괄호 요일 또는 단독 요일 한 글자
-_WEEKDAY_TOKEN_PATTERN = re.compile(r"^[\(（]?[월화수목금토일][\)）]?$")
+# 요일 토큰 정규식: 괄호 요일 또는 단독 요일 한 글자 (+ '요일' 접미사 대응)
+# 예: '금', '(금)', '금요일', '(금요일)'
+_WEEKDAY_TOKEN_PATTERN = re.compile(r"^[\(（]?\s*[월화수목금토일]\s*(요일)?\s*[\)）]?$")
 
 # 요일 헤더 정규식: MON ~ SUN 단어 경계 매칭
 _DAY_HEADER_PATTERN = re.compile(

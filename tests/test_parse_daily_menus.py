@@ -108,6 +108,33 @@ def test_is_weekday_token():
     assert not _is_weekday_token("콩나물국")
 
 
+def test_is_weekday_token_with_yoil_suffix():
+    """'요일' 접미사 토큰도 메뉴로 유입되면 안 된다 (목요일에 '금요일' 유입 사례)."""
+    assert _is_weekday_token("금요일")
+    assert _is_weekday_token("(금요일)")
+    assert _is_weekday_token("월요일")
+    assert not _is_weekday_token("감자탕")
+    assert not _is_weekday_token("매운미트볼조림")
+
+
+def test_date_with_yoil_suffix_consumed_as_date_not_menu():
+    """'10월16일 (금요일)' 형태는 날짜로 소비되고 메뉴로 유입되지 않는다."""
+    items = [
+        {
+            "text": "10월16일 (금요일)",
+            "x": 450, "y": 0, "x1": 430, "x2": 470, "text_len": 12,
+        },
+        {"text": "A코스", "x": 30, "y": 50, "x1": 30, "x2": 60, "text_len": 3},
+        {"text": "부추무침", "x": 450, "y": 100, "x1": 450, "x2": 490, "text_len": 4},
+    ]
+    result = parse_daily_menus(items, period_str="26.10.12~10.16")
+
+    assert "2026-10-16 (금)" in result
+    a_course = result["2026-10-16 (금)"]["courses"]["A코스"]
+    assert a_course == ["부추무침"]
+    assert not any("10월16일" in it or "금요일" in it for it in a_course)
+
+
 # ------------------------------------------------------------
 # (T3) OCR 디버그 페이로드 빌더
 # ------------------------------------------------------------
