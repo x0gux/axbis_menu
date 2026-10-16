@@ -1,0 +1,7 @@
+F2 코드 품질 검토
+========================
+- py_compile croll.py main.py: 성공
+- 순수함수 분리: _normalize_ocr_text / _find_date_line / _find_all_dates / _is_weekday_token / _find_day_headers / _weekday_from_date / _parse_period_dates / _year_from_post_date / build_ocr_debug / _is_fresh(main)
+- 기존 스타일 유지: 한글 docstring/주석, 4-space, 세로로 긴 호출 스타일 보존
+- requirements.txt 무변경 (pytest는 requirements-dev.txt에만 — Vercel 번들 오염 없음)
+- PaddleOCR 초기화 파라미터 무변경 (grep: lang="korean", use_doc_* 옵션 동일)

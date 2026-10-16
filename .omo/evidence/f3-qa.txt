@@ -1,0 +1,8 @@
+F3 실제 서빙 QA
+========================
+- .venv312/bin/python croll.py: 종료코드 0 (meal_output 재생성)
+- uvicorn main:app --port 8000 기동 → GET /meal
+- 응답 daily_menus: 2026-10-12(월) ~ 2026-10-16(금) 5일 전체 반환
+- post.date=2026-10-12, period=26.10.12~10.16, 스키마 필드 보존 확인
+- 재크롤링 경로: post.date가 오늘(2026-10-16)로부터 4일 → fresh 판정으로 즉시 반환 (재크롤링 불필요 경로 확인)
+- 재크롤링 폴백 경로: tests/test_main_freshness.py (g) 시나리오에서 검증 완료

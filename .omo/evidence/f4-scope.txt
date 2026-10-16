@@ -1,0 +1,8 @@
+F4 범위 준수 검사
+========================
+- git diff (meal_output/.omo/.venv312 제외): 추적된 __pycache__/*.pyc만 변경 — 커밋 대상 아님(부산물)
+- vercel.json 무변경, .github/workflows/crawl_meal.yml 무변경
+- PaddleOCR 초기화 파라미터 무변경, get_latest_meal_post 로직 무변경
+- 응답 스키마 필드 삭제 없음 (post/period/images/daily_menus/menu_text 보존, F3 curl로 확인)
+- OCR 오인식 텍스트("숭능/승능") 교정 없음 — Scope OUT 준수 (A2 기본 채택 가정)
+- meal_output/ 산출물은 CI 봇(chore(auto)) 관할로 미커밋 유지 (Commit 전략 E4 준수)
