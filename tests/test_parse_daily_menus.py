@@ -191,12 +191,18 @@ FIXTURE_PATH = os.path.join(
     os.path.dirname(__file__), "fixtures", "ocr_items.json"
 )
 
+# 26.10.19 주차: 코스 라벨이 세로 쓰기 레이아웃 탓에 글자별 박스로
+# 분리된 실측 사례 ('A','코','^' / 'B','코','스')
+FIXTURE_PATH_VERTICAL_LABELS = os.path.join(
+    os.path.dirname(__file__), "fixtures", "ocr_items_2026-10-19.json"
+)
 
-def _load_fixture_items():
-    if not os.path.exists(FIXTURE_PATH):
-        pytest.skip("tests/fixtures/ocr_items.json 없음 - T5 실측 크롤링 선행 필요")
 
-    with open(FIXTURE_PATH, encoding="utf-8") as f:
+def _load_fixture_items(path=FIXTURE_PATH):
+    if not os.path.exists(path):
+        pytest.skip(f"{path} 없음 - T5 실측 크롤링 선행 필요")
+
+    with open(path, encoding="utf-8") as f:
         fixture = json.load(f)
 
     period = fixture.get("period", "")
@@ -362,3 +368,76 @@ def test_parse_period_dates():
 
     start, end = _parse_period_dates("")
     assert start is None and end is None
+
+
+# ------------------------------------------------------------
+# (T7) 세로 분리 코스 라벨 복원 (26.10.19 주차 실측 회귀)
+# 라벨이 'A','코','스' 글자별 박스로 분리되면 모든 메뉴가
+# 단일 '공통' 코스로 흡수되던 결함의 회귀 감지.
+# ------------------------------------------------------------
+
+def _load_vertical_label_fixture():
+    return _load_fixture_items(FIXTURE_PATH_VERTICAL_LABELS)
+
+
+def test_vertical_course_labels_extracted():
+    """분리된 조각(A/코/스, B/코/스)이 코스 라벨로 복원되어야 한다."""
+    from croll import _extract_vertical_course_labels
+
+    items, _period, _year = _load_vertical_label_fixture()
+
+    labels, consumed = _extract_vertical_course_labels(items)
+
+    course_names = sorted(name for _y, name in labels)
+    assert course_names == ["A코스", "B코스"], f"복원된 라벨 이상: {labels}"
+
+    # 라벨 조각(A, 코, 스, ^)은 메뉴 후보에서 소비되어야 한다
+    consumed_texts = {items[i]["text"] for i in consumed}
+    assert consumed_texts == {"A", "코", "^", "B", "스"}
+
+
+def test_vertical_label_fixture_restores_full_week():
+    items, period, year = _load_vertical_label_fixture()
+
+    daily_menus = parse_daily_menus(items, period, year=year)
+
+    assert len(daily_menus) == 5, f"일자 수 이상: {sorted(daily_menus.keys())}"
+
+
+def test_vertical_label_fixture_splits_courses():
+    """모든 날짜가 A코스/B코스/공통으로 분리되어야 한다 (공통 단일 코스 결함)."""
+    items, period, year = _load_vertical_label_fixture()
+
+    daily_menus = parse_daily_menus(items, period, year=year)
+
+    for date_key, menu in daily_menus.items():
+        courses = menu["courses"]
+        assert "A코스" in courses, f"{date_key} A코스 누락: {list(courses)}"
+        assert "B코스" in courses, f"{date_key} B코스 누락: {list(courses)}"
+        assert "공통" in courses, f"{date_key} 공통 누락: {list(courses)}"
+        assert len(courses) == 3, f"{date_key} 코스 구성 이상: {list(courses)}"
+
+
+def test_vertical_label_fixture_no_label_fragments_in_menus():
+    """라벨 조각 토큰이 메뉴로 유입되지 않아야 한다."""
+    items, period, year = _load_vertical_label_fixture()
+
+    daily_menus = parse_daily_menus(items, period, year=year)
+
+    fragment_tokens = {"A", "코", "스", "^", "B"}
+    for date_key, menu in daily_menus.items():
+        for course, names in menu["courses"].items():
+            leaked = fragment_tokens.intersection(names)
+            assert not leaked, f"{date_key} {course} 라벨 조각 유입: {leaked}"
+
+
+def test_course_label_accepts_dropped_last_char():
+    """'스'가 탈락한 'A코' 형태도 코스 라벨로 인식한다."""
+    from croll import _find_course_label
+
+    assert _find_course_label("A코") == "A코스"
+    assert _find_course_label("B 코") == "B코스"
+    assert _find_course_label("A코스") == "A코스"
+    assert _find_course_label("A 코 스") == "A코스"
+    assert _find_course_label("공통") == "공통"
+    assert _find_course_label("콩나물국") is None

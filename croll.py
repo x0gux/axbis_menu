@@ -943,9 +943,95 @@ def _find_course_label(line):
     m2 = re.match(r"^([A-Za-z])\s+코", line_stripped)
     if m2 and len(line_stripped) <= 6:
         return m2.group(1).upper() + "코스"
+    # OCR 오인식 대응: '스' 글자 탈락 (A코, B 코)
+    m3 = re.match(r"^([A-Za-z])\s*코$", line_stripped)
+    if m3:
+        return m3.group(1).upper() + "코스"
     if "공통" in line_stripped and len(line_stripped) <= 4:
         return "공통"
     return None
+
+
+# 세로 분리 라벨 조각: 알파벳 1자, 라벨 구성 글자 1자,
+# 또는 OCR 오인식 단일 기호(^, ス, ㅅ 등) — 숫자/공백은 제외
+_COURSE_FRAGMENT_PATTERN = re.compile(
+    r"^(?:[A-Za-z]|[코스공통]|[^0-9\s가-힣A-Za-z])$"
+)
+
+
+def _extract_vertical_course_labels(
+    ocr_items,
+    x_tolerance=15.0,
+    y_gap_tolerance=40.0,
+):
+    """세로로 분리된 코스 라벨 조각들을 클러스터링해 복원한다.
+
+    라벨(A코스/B코스/공통)이 좌측 세로 쓰기 레이아웃 탓에 OCR에서
+    글자별 박스로 분리되어 'A','코','스'('스'는 '^' 등으로 오인식 가능)
+    처럼 나오는 경우 대응한다. (26.10.19 주차 실측 사례)
+
+    - 짧은(1자) 조각들 중 x 중심이 비슷하고 y 간격이 가까운 사슬을 묶고,
+      이어 붙인 텍스트가 코스 라벨로 인식될 때만 유효한 클러스터로 삼는다.
+    - 라벨로 확정된 조각은 메뉴 후보에서 제외되어야 하므로
+      소비된 원본 인덱스를 함께 반환한다.
+
+    반환: (라벨 목록 [(y_center, course_name)], 소비된 아이템 인덱스 집합)
+    """
+    fragments = []
+    for idx, item in enumerate(ocr_items):
+        text = (item.get("text") or "").strip()
+        if not text or len(text) > 2:
+            continue
+        if not _COURSE_FRAGMENT_PATTERN.match(text):
+            continue
+        fragments.append({
+            "idx": idx,
+            "x": float(item.get("x", 0) or 0),
+            "y": float(item.get("y", 0) or 0),
+            "text": text,
+        })
+
+    # 위→아래 순서로 사슬(cluster) 형성
+    fragments.sort(key=lambda f: (f["y"], f["x"]))
+
+    labels = []
+    consumed = set()
+    used = set()
+    pos = 0
+
+    while pos < len(fragments):
+        if pos in used:
+            pos += 1
+            continue
+
+        chain = [fragments[pos]]
+        used.add(pos)
+
+        for k in range(pos + 1, len(fragments)):
+            if k in used:
+                continue
+            head = chain[-1]
+            frag = fragments[k]
+            mean_x = sum(f["x"] for f in chain) / len(chain)
+            if (
+                abs(frag["x"] - mean_x) <= x_tolerance
+                and frag["y"] - head["y"] <= y_gap_tolerance
+            ):
+                chain.append(frag)
+                used.add(k)
+
+        # 2개 이상 조각이 모이고 이어 붙인 텍스트가 라벨일 때만 확정
+        if len(chain) >= 2:
+            joined = "".join(f["text"] for f in chain)
+            course = _find_course_label(joined)
+            if course:
+                y_center = sum(f["y"] for f in chain) / len(chain)
+                labels.append((y_center, course))
+                consumed.update(f["idx"] for f in chain)
+
+        pos += 1
+
+    return labels, consumed
 
 
 def parse_daily_menus(ocr_items, period_str="", year=None):
@@ -1000,7 +1086,16 @@ def parse_daily_menus(ocr_items, period_str="", year=None):
     course_rows = []    # [(y_center, course_name)]
     menu_items = []     # 메뉴 후보 텍스트
 
-    for item in ocr_items:
+    # 0) 세로 분리 코스 라벨 복원 (A/코/스 처럼 글자별 박스로 분리된 라벨)
+    vertical_labels, label_consumed = _extract_vertical_course_labels(ocr_items)
+    for y_center, course_name in vertical_labels:
+        course_rows.append((y_center, course_name))
+
+    for idx, item in enumerate(ocr_items):
+        # 라벨 조각으로 소비된 아이템은 메뉴/날짜 후보에서 제외
+        if idx in label_consumed:
+            continue
+
         text = item.get("text", "")
         x = float(item.get("x", 0) or 0)
         y = float(item.get("y", 0) or 0)
