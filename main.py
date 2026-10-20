@@ -67,6 +67,45 @@ def _crawl_menu():
     croll.main()
 
 
+@app.post("/meal/refresh")
+def meal_refresh():
+    """신선도 조건 없이 강제로 크롤링을 실행한다.
+
+    프론트엔드(axbis_lunch)의 수동 갱신 버튼에서 호출된다.
+    /meal과 동일하게 크롤링 실패 시 기존(stale) 데이터가 있으면
+    그것을 반환한다(가용성 우선). refreshed 필드로 성공 여부를 알린다.
+    """
+    result = _load_weekly_menu()
+
+    try:
+        _crawl_menu()
+    except Exception as e:
+        # 재크롤링 실패 시: 기존 데이터가 있으면 그것과 함께 실패를 알림
+        if result:
+            return {
+                "refreshed": False,
+                "error": str(e),
+                "data": result,
+            }
+        return {
+            "refreshed": False,
+            "error": f"메뉴가 없으며, 강제 크롤링을 실행할 수 없습니다: {e}",
+        }
+
+    # 크롤링 후 다시 전체 데이터 읽기
+    fresh_result = _load_weekly_menu()
+    if fresh_result:
+        return {
+            "refreshed": True,
+            "data": fresh_result,
+        }
+
+    return {
+        "refreshed": False,
+        "error": "크롤링 후 메뉴를 찾을 수 없습니다.",
+    }
+
+
 @app.get("/meal")
 def meal():
     # 1) 전체 주간 메뉴 데이터 확인

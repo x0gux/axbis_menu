@@ -115,3 +115,64 @@ def test_meal_crawl_failure_falls_back_to_stale(monkeypatch, tmp_path):
 
     assert fake.calls == 1
     assert "old-key" in result["daily_menus"]
+
+
+# ------------------------------------------------------------
+# /meal/refresh 강제 갱신 경로 (프론트 수동 갱신 버튼용)
+# ------------------------------------------------------------
+
+def test_meal_refresh_forces_crawl_even_when_fresh(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "OUTPUT_DIR", str(tmp_path))
+    # 데이터가 신선해도(force 조건 없음) 크롤링이 실행되어야 한다
+    fresh_payload = {
+        "post": {"date": date.today().isoformat(), "title": "new"},
+        "daily_menus": {"2026-10-16 (금)": {}},
+    }
+    _write_menu(fresh_payload)
+
+    updated_payload = {
+        "post": {"date": date.today().isoformat(), "title": "updated"},
+        "daily_menus": {"2026-10-20 (화)": {}},
+    }
+    fake = _FakeCroll(updated_payload)
+    monkeypatch.setitem(sys.modules, "croll", fake)
+
+    result = main.meal_refresh()
+
+    assert fake.calls == 1
+    assert result["refreshed"] is True
+    assert "2026-10-20 (화)" in result["data"]["daily_menus"]
+
+
+def test_meal_refresh_failure_falls_back_to_stale(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "OUTPUT_DIR", str(tmp_path))
+    stale_payload = {
+        "post": {"date": "2026-10-01", "title": "old"},
+        "daily_menus": {"old-key": {}},
+    }
+    _write_menu(stale_payload)
+
+    fake = _FakeCroll(None, fail=True)
+    monkeypatch.setitem(sys.modules, "croll", fake)
+
+    # 예외가 밖으로 새지 않고 stale 데이터와 실패 표시를 반환한다
+    result = main.meal_refresh()
+
+    assert fake.calls == 1
+    assert result["refreshed"] is False
+    assert "error" in result
+    assert "old-key" in result["data"]["daily_menus"]
+
+
+def test_meal_refresh_failure_without_existing_data(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "OUTPUT_DIR", str(tmp_path))
+
+    fake = _FakeCroll(None, fail=True)
+    monkeypatch.setitem(sys.modules, "croll", fake)
+
+    result = main.meal_refresh()
+
+    assert fake.calls == 1
+    assert result["refreshed"] is False
+    assert "error" in result
+    assert "data" not in result
