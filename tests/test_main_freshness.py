@@ -6,7 +6,7 @@ croll은 sys.modules 스텁으로 대체하므로 paddleocr 미설치에서도 �
 import json
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -176,3 +176,146 @@ def test_meal_refresh_failure_without_existing_data(monkeypatch, tmp_path):
     assert result["refreshed"] is False
     assert "error" in result
     assert "data" not in result
+
+
+def test_meal_refresh_skips_crawl_within_cooldown(monkeypatch, tmp_path):
+    """마지막 성공 크롤링이 쿨다운 이내면 크롤링 없이 현재 데이터를 반환한다."""
+    monkeypatch.setattr(main, "OUTPUT_DIR", str(tmp_path))
+    payload = {
+        "post": {"date": date.today().isoformat(), "title": "recent"},
+        "daily_menus": {"2026-10-16 (금)": {}},
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_menu(payload)
+
+    fake = _FakeCroll(payload)
+    monkeypatch.setitem(sys.modules, "croll", fake)
+
+    result = main.meal_refresh()
+
+    # 크롤링이 호출되지 않고 성공으로 처리된다 (남용 방지)
+    assert fake.calls == 0
+    assert result["refreshed"] is True
+    assert "message" in result
+    assert "2026-10-16 (금)" in result["data"]["daily_menus"]
+
+
+def test_meal_refresh_after_cooldown_crawls(monkeypatch, tmp_path):
+    """captured_at이 쿨다운보다 오래되었으면 다시 크롤링한다."""
+    monkeypatch.setattr(main, "OUTPUT_DIR", str(tmp_path))
+    old_captured = datetime.now(timezone.utc) - timedelta(
+        seconds=main.CRAWL_COOLDOWN_SECONDS + 1
+    )
+    payload = {
+        "post": {"date": "2026-10-01", "title": "old"},
+        "daily_menus": {"old-key": {}},
+        "captured_at": old_captured.isoformat(),
+    }
+    _write_menu(payload)
+
+    fresh_payload = {
+        "post": {"date": date.today().isoformat(), "title": "new"},
+        "daily_menus": {"2026-10-16 (금)": {}},
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+    }
+    fake = _FakeCroll(fresh_payload)
+    monkeypatch.setitem(sys.modules, "croll", fake)
+
+    result = main.meal_refresh()
+
+    assert fake.calls == 1
+    assert result["refreshed"] is True
+
+
+def test_meal_auto_recrawl_skipped_during_cooldown(monkeypatch, tmp_path):
+    """/meal은 stale이어도 쿨다운 중이면 크롤링을 재시도하지 않는다."""
+    monkeypatch.setattr(main, "OUTPUT_DIR", str(tmp_path))
+    stale_payload = {
+        "post": {"date": "2026-10-01", "title": "old"},
+        "daily_menus": {"old-key": {}},
+    }
+    _write_menu(stale_payload)
+
+    # 직전에 크롤링을 시도한 직후라고 가정
+    main._touch_crawl_attempt()
+
+    fake = _FakeCroll(None)
+    monkeypatch.setitem(sys.modules, "croll", fake)
+
+    result = main.meal()
+
+    assert fake.calls == 0
+    assert "old-key" in result["daily_menus"]
+
+
+def test_meal_auto_recrawl_runs_after_cooldown(monkeypatch, tmp_path):
+    """/meal은 stale + 쿨다운 경과 시 크롤링을 재시도한다."""
+    monkeypatch.setattr(main, "OUTPUT_DIR", str(tmp_path))
+    stale_payload = {
+        "post": {"date": "2026-10-01", "title": "old"},
+        "daily_menus": {"old-key": {}},
+    }
+    _write_menu(stale_payload)
+
+    # 마커 파일을 쿨다운 이전 시각으로 조작
+    marker = os.path.join(str(tmp_path), ".last_crawl_attempt")
+    old = datetime.now(timezone.utc) - timedelta(
+        seconds=main.CRAWL_COOLDOWN_SECONDS + 1
+    )
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write(old.isoformat())
+
+    fresh_payload = {
+        "post": {"date": date.today().isoformat(), "title": "new"},
+        "daily_menus": {"2026-10-16 (금)": {}},
+    }
+    fake = _FakeCroll(fresh_payload)
+    monkeypatch.setitem(sys.modules, "croll", fake)
+
+    result = main.meal()
+
+    assert fake.calls == 1
+    assert "2026-10-16 (금)" in result["daily_menus"]
+
+
+# ------------------------------------------------------------
+# FastAPI 라우트 레벨 테스트 (TestClient)
+# ------------------------------------------------------------
+
+def test_meal_route_returns_fresh_data(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(main, "OUTPUT_DIR", str(tmp_path))
+    payload = {
+        "post": {"date": date.today().isoformat(), "title": "new"},
+        "daily_menus": {"2026-10-16 (금)": {"courses": {}}},
+    }
+    _write_menu(payload)
+
+    client = TestClient(main.app)
+    response = client.get("/meal")
+
+    assert response.status_code == 200
+    assert "2026-10-16 (금)" in response.json()["daily_menus"]
+
+
+def test_meal_refresh_route_contract(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(main, "OUTPUT_DIR", str(tmp_path))
+    fresh_payload = {
+        "post": {"date": date.today().isoformat(), "title": "new"},
+        "daily_menus": {"2026-10-16 (금)": {"courses": {}}},
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_menu(fresh_payload)
+
+    client = TestClient(main.app)
+    response = client.post("/meal/refresh")
+
+    # 쿨다운 이내 → 크롤링 없이 성공 응답
+    assert response.status_code == 200
+    body = response.json()
+    assert body["refreshed"] is True
+    assert "message" in body
+    assert "data" in body

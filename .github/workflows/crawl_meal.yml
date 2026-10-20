@@ -49,3 +49,19 @@ jobs:
             git pull --rebase origin main
             git push origin HEAD:main
           }
+
+      - name: Notify crawl failure
+        if: failure()
+        env:
+          CRAWL_FAILURE_WEBHOOK: ${{ secrets.CRAWL_FAILURE_WEBHOOK }}
+        run: |
+          # Discord 웹훅 형식({"content": ...}). 슬랙은 {"text": ...}로 변경 필요.
+          if ([string]::IsNullOrEmpty($env:CRAWL_FAILURE_WEBHOOK)) {
+            Write-Host "CRAWL_FAILURE_WEBHOOK 시크릿 미설정 - 알림을 건너뜁니다."
+            exit 0
+          }
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $message = "구내식 메뉴 크롤링 실패 - 확인 필요: $runUrl"
+          $payload = @{ content = $message } | ConvertTo-Json
+          $body = [System.Text.Encoding]::UTF8.GetBytes($payload)
+          Invoke-RestMethod -Uri $env:CRAWL_FAILURE_WEBHOOK -Method Post -Body $body -ContentType "application/json; charset=utf-8"

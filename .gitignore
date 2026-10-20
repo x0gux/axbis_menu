@@ -5,3 +5,7 @@ venv/
 .env
 .vercel/
 .venv312/
+meal_output/menu.txt
+meal_output/menu_*.png
+meal_output/menu_*.jpg
+meal_output/.last_crawl_attempt

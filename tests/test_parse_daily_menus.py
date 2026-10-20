@@ -441,3 +441,134 @@ def test_course_label_accepts_dropped_last_char():
     assert _find_course_label("A 코 스") == "A코스"
     assert _find_course_label("공통") == "공통"
     assert _find_course_label("콩나물국") is None
+
+
+# ------------------------------------------------------------
+# (T8) OCR 오인식 교정 사전: 숭늉 변형 통일, 단무지 교정
+# 숭늉이 숭능/승능/숭늄으로 오인식되는 실측 결함 (26.10.12/10.19 주차)
+# ------------------------------------------------------------
+
+def test_correct_ocr_text():
+    from croll import _correct_ocr_text
+
+    assert _correct_ocr_text("숭능") == "숭늉"
+    assert _correct_ocr_text("승능") == "숭늉"
+    assert _correct_ocr_text("숭늄") == "숭늉"
+    assert _correct_ocr_text("숭늉") == "숭늉"
+    assert _correct_ocr_text("단부지") == "단무지"
+    # 사전에 없는 텍스트는 그대로 유지
+    assert _correct_ocr_text("그린샐러드/드레싱") == "그린샐러드/드레싱"
+
+
+def test_parse_applies_ocr_corrections():
+    """파싱 결과의 메뉴 텍스트에 교정 사전이 적용되어야 한다."""
+    items = [
+        {"text": "10월12일", "x": 100, "y": 0, "x1": 100, "x2": 150, "text_len": 6},
+        {"text": "A코스", "x": 30, "y": 50, "x1": 30, "x2": 60, "text_len": 3},
+        {"text": "승능", "x": 100, "y": 100, "x1": 100, "x2": 140, "text_len": 2},
+        {"text": "단부지", "x": 100, "y": 130, "x1": 100, "x2": 140, "text_len": 3},
+        {"text": "흑미밥", "x": 100, "y": 160, "x1": 100, "x2": 140, "text_len": 3},
+    ]
+    result = parse_daily_menus(items)
+
+    a_course = result["2026-10-12 (월)"]["courses"]["A코스"]
+    assert a_course == ["숭늉", "단무지", "흑미밥"]
+
+
+def test_live_fixture_menu_items_corrected():
+    """실측 픽스처에서도 숭늉 계열 변형이 숭늉으로 통일되어야 한다."""
+    from croll import OCR_TEXT_CORRECTIONS
+
+    items, period, year = _load_fixture_items()
+    daily_menus = parse_daily_menus(items, period, year=year)
+
+    wrong_variants = set(OCR_TEXT_CORRECTIONS) - {"단부지"}  # 숭능/승능/숭늄
+    for date_key, menu in daily_menus.items():
+        all_items = [name for names in menu["courses"].values() for name in names]
+        leaked = wrong_variants.intersection(all_items)
+        assert not leaked, f"{date_key} 미교정 OCR 변형: {leaked}"
+        assert "숭늉" in all_items, f"{date_key}에 교정된 숭늉 없음: {all_items}"
+
+
+# ------------------------------------------------------------
+# (T9) 파싱 품질 검증 (sanity check)
+# 26.10.19 주차 '공통 흡수' 결함을 크롤링 시점에 잡아내는 회귀
+# ------------------------------------------------------------
+
+def _sample_day(a_items, b_items, common_items):
+    return {
+        "date": "2026-10-19",
+        "weekday": "월",
+        "courses": {
+            "A코스": list(a_items),
+            "B코스": list(b_items),
+            "공통": list(common_items),
+        },
+    }
+
+
+def test_validate_healthy_week_has_no_issues():
+    from croll import validate_daily_menus
+
+    menus = {
+        f"2026-10-{10 + d} ({'월화수목금'[d - 1]})": _sample_day(
+            ["흑미밥"] * 5, ["중식볶음밥"] * 4, ["배추김치"] * 3
+        )
+        for d in range(1, 6)
+    }
+
+    warnings, severe = validate_daily_menus(menus)
+
+    assert severe == []
+    assert warnings == []
+
+
+def test_validate_detects_common_absorption_signature():
+    """모든 날짜가 단일 '공통' 코스로 흡수되면 치명으로 판정한다 (26.10.19 결함)."""
+    from croll import validate_daily_menus
+
+    menus = {
+        f"2026-10-{10 + d} ({'월화수목금'[d - 1]})": {
+            "date": f"2026-10-{10 + d}",
+            "weekday": "월화수목금"[d - 1],
+            "courses": {"공통": ["흑미밥"] * 12},
+        }
+        for d in range(1, 6)
+    }
+
+    warnings, severe = validate_daily_menus(menus)
+
+    assert len(severe) == 1
+    assert "단일 코스로 흡수" in severe[0]
+
+
+def test_validate_no_parsed_days_is_severe():
+    from croll import validate_daily_menus
+
+    warnings, severe = validate_daily_menus({})
+
+    assert len(severe) == 1
+    assert warnings == []
+
+
+def test_validate_empty_day_is_warning_only():
+    """공휴일로 보이는 빈 날짜는 경고만 하고 치명 처리하지 않는다."""
+    from croll import validate_daily_menus
+
+    menus = {
+        f"2026-10-{10 + d} ({'월화수목금'[d - 1]})": _sample_day(
+            ["흑미밥"] * 5, ["중식볶음밥"] * 4, ["배추김치"] * 3
+        )
+        for d in range(1, 6)
+    }
+    menus["2026-10-13 (화)"] = {
+        "date": "2026-10-13",
+        "weekday": "화",
+        "courses": {},
+    }
+
+    warnings, severe = validate_daily_menus(menus)
+
+    assert severe == []
+    assert len(warnings) == 1
+    assert "2026-10-13" in warnings[0]

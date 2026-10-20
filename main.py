@@ -1,10 +1,21 @@
 # pyrefly: ignore [missing-import]
 from fastapi import FastAPI
-from datetime import date
+from fastapi.middleware.cors import CORSMiddleware
+from datetime import date, datetime, timezone
 import json
 import os
+import tempfile
 
 app = FastAPI()
+
+# 프론트엔드(브라우저)에서 백엔드 API를 직접 호출할 수 있도록 CORS 허용.
+# 읽기 전용 공개 API이므로 전체 오리진을 허용한다.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "meal_output")
@@ -13,6 +24,14 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "meal_output")
 # 게시물이 메뉴 주간 시작 전에 올라오는 경우 조기 stale 처리되지만
 # 과잉 크롤링 방향이라 안전하다.
 REFRESH_DAYS = 7
+
+# 크롤링 쿨다운(초). 크롤링은 고비용 작업(OCR, 최대 60초)이라
+# 짧은 시간 안에 반복 트리거되는 것을 막는다.
+# - /meal 자동 재크롤링: 마지막 '시도' 기준 (실패 반복 시 요청마다
+#   크롤링이 몰리는 것을 방지)
+# - /meal/refresh 수동 갱신: 마지막 '성공' 기준 (사용자 의도를 존중해
+#   실패했으면 재시도를 허용)
+CRAWL_COOLDOWN_SECONDS = 300
 
 
 @app.get("/")
@@ -64,7 +83,68 @@ def _crawl_menu():
     커밋)이 담당한다.
     """
     import croll
+
+    _touch_crawl_attempt()
     croll.main()
+
+
+# ------------------------------------------------------------
+# 크롤링 쿨다운 (고비용 작업 반복 트리거 방지)
+# ------------------------------------------------------------
+
+def _crawl_marker_paths():
+    """크롤링 시도 시각 마커 후보 경로. 읽기 전용 파일시스템(Vercel)에서는
+    /tmp로 폴백한다."""
+    return [
+        os.path.join(OUTPUT_DIR, ".last_crawl_attempt"),
+        os.path.join(tempfile.gettempdir(), "axbis_menu_last_crawl_attempt"),
+    ]
+
+
+def _touch_crawl_attempt():
+    """크롤링 '시도' 시각을 기록한다."""
+    stamp = datetime.now(timezone.utc).isoformat()
+    for path in _crawl_marker_paths():
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(stamp)
+            return
+        except OSError:
+            continue
+
+
+def _last_crawl_attempt_at():
+    """마지막 크롤링 '시도' 시각을 반환한다. 없으면 None."""
+    for path in _crawl_marker_paths():
+        try:
+            with open(path, encoding="utf-8") as f:
+                return datetime.fromisoformat(f.read().strip())
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _is_crawl_on_cooldown():
+    """마지막 시도가 쿨다운 이내인지 판정한다."""
+    last = _last_crawl_attempt_at()
+    if last is None:
+        return False
+    elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+    return elapsed < CRAWL_COOLDOWN_SECONDS
+
+
+def _captured_at(menu_payload):
+    """menu.json의 captured_at(마지막 '성공' 크롤링 시각)을 반환한다.
+
+    구버전 menu.json(필드 없음)은 None - 쿨다운 없이 동작(하위 호환).
+    """
+    if not menu_payload:
+        return None
+    raw = menu_payload.get("captured_at")
+    try:
+        return datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 @app.post("/meal/refresh")
@@ -74,8 +154,25 @@ def meal_refresh():
     프론트엔드(axbis_lunch)의 수동 갱신 버튼에서 호출된다.
     /meal과 동일하게 크롤링 실패 시 기존(stale) 데이터가 있으면
     그것을 반환한다(가용성 우선). refreshed 필드로 성공 여부를 알린다.
+
+    남용 방지: 마지막 '성공' 크롤링이 쿨다운 이내면 크롤링을 건너뛰고
+    현재 데이터를 즉시 반환한다. 실패한 시도는 쿨다운을 만들지 않아
+    사용자가 곧바로 재시도할 수 있다.
     """
     result = _load_weekly_menu()
+
+    captured = _captured_at(result)
+    if captured is not None:
+        elapsed = (datetime.now(timezone.utc) - captured).total_seconds()
+        if elapsed < CRAWL_COOLDOWN_SECONDS and result:
+            return {
+                "refreshed": True,
+                "message": (
+                    "최근에 갱신된 데이터입니다. "
+                    f"{int(CRAWL_COOLDOWN_SECONDS - elapsed)}초 후 재크롤링 가능합니다."
+                ),
+                "data": result,
+            }
 
     try:
         _crawl_menu()
@@ -115,16 +212,20 @@ def meal():
     if result and _is_fresh(result.get("post", {}).get("date")):
         return result
 
-    # 3) 없거나 오래되었으면 크롤링 실행
-    try:
-        _crawl_menu()
-    except Exception as e:
-        # 재크롤링 실패 시: 기존(stale) 데이터가 있으면 그것을 반환(가용성 우선)
+    # 3) 없거나 오래되었으면 크롤링 실행 (쿨다운 중이면 건너뛰고 stale 반환)
+    if _is_crawl_on_cooldown():
         if result:
             return result
-        return {
-            "message": f"메뉴가 없으며, 자동 크롤링을 실행할 수 없습니다: {e}"
-        }
+    else:
+        try:
+            _crawl_menu()
+        except Exception as e:
+            # 재크롤링 실패 시: 기존(stale) 데이터가 있으면 그것을 반환(가용성 우선)
+            if result:
+                return result
+            return {
+                "message": f"메뉴가 없으며, 자동 크롤링을 실행할 수 없습니다: {e}"
+            }
 
     # 4) 크롤링 후 다시 전체 데이터 읽기
     fresh_result = _load_weekly_menu()

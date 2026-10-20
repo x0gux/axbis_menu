@@ -77,6 +77,28 @@ DAY_KEYWORDS = {
 
 
 # ============================================================
+# OCR 오인식 교정 사전
+# ============================================================
+# 동일 메뉴의 OCR 변형 표기를 실제 표기로 통일한다.
+# 실측(26.10.12 / 26.10.19 주차): '숭늉'이 숭능/승능/숭늄으로,
+# '단무지'가 단부지로 오인식됨. (숭늉 = 누룽지 탕)
+OCR_TEXT_CORRECTIONS = {
+    "숭능": "숭늉",
+    "승능": "숭늉",
+    "숭늄": "숭늉",
+    "단부지": "단무지",
+}
+
+
+def _correct_ocr_text(text):
+    """메뉴 텍스트의 알려진 OCR 오인식을 교정한다.
+
+    정확히 일치하는 표기만 교정한다(부분 문자열 치환은 오탐 위험).
+    """
+    return OCR_TEXT_CORRECTIONS.get(text.strip(), text)
+
+
+# ============================================================
 # Session
 # ============================================================
 
@@ -1170,7 +1192,8 @@ def parse_daily_menus(ocr_items, period_str="", year=None):
         if skip:
             continue
 
-        menu_items.append(item)
+        # 알려진 OCR 오인식 교정 (숭능→숭늉 등)
+        menu_items.append(dict(item, text=_correct_ocr_text(text)))
 
     # ----- 날짜 행 → 열 앵커 -----
     # y가 가까운 날짜들이 한 행(주간 그리드의 날짜 줄)을 이룬다.
@@ -1448,6 +1471,80 @@ def parse_daily_menus(ocr_items, period_str="", year=None):
 
 
 # ============================================================
+# 8.5 파싱 품질 검증
+# ============================================================
+
+class MenuQualityError(RuntimeError):
+    """파싱 결과에 심각한 구조 이상이 있을 때 발생한다.
+
+    CI에서는 크롤링 단계 실패로 이어져 잘못된 데이터의 커밋을 막고
+    실패 알림을 트리거하며, /meal/refresh에서는 stale 폴백으로 이어진다.
+    """
+
+
+def validate_daily_menus(daily_menus):
+    """파싱된 날짜별 메뉴의 구조 이상을 검사한다.
+
+    반환: (경고 목록, 치명 문제 목록)
+
+    - 경고: 공휴일 빈 날짜 등 정상일 수 있는 이상 (로그만 남김)
+    - 치명: 관측된 결함의 명확한 서명. 이 경우 크롤링을 실패 처리해
+      깨진 데이터가 그대로 서빙/커밋되는 것을 막는다.
+      (26.10.19 주차: 세로 분리 라벨 미인식 → 전 메뉴가 '공통' 1개로 흡수)
+    """
+    warnings = []
+    severe = []
+
+    if not daily_menus:
+        severe.append("날짜별 메뉴가 하나도 파싱되지 않았습니다.")
+        return warnings, severe
+
+    item_counts = {
+        key: sum(len(v) for v in menu.get("courses", {}).values())
+        for key, menu in daily_menus.items()
+    }
+
+    # 빈 날짜: 공휴일일 수 있어 치명이 아님
+    empty_days = sorted(k for k, n in item_counts.items() if n == 0)
+    if empty_days:
+        warnings.append(
+            f"아이템이 없는 날짜 (공휴일일 수 있음): {', '.join(empty_days)}"
+        )
+
+    # 비어있지 않은 날짜만 대상으로 구조 검사
+    course_counts = {
+        key: len(menu.get("courses", {}))
+        for key, menu in daily_menus.items()
+        if item_counts[key] > 0
+    }
+    non_empty_days = len(course_counts)
+
+    # 치명: 모든 날짜가 단일 코스로 흡수된 경우
+    # (라벨이 하나도 인식되지 않으면 find_course가 단일 '메뉴'로 몰아넣음)
+    if non_empty_days >= 3 and all(n == 1 for n in course_counts.values()):
+        severe.append(
+            "모든 날짜의 메뉴가 단일 코스로 흡수되었습니다 "
+            "(코스 라벨 인식 실패 추정 - '공통 흡수' 결함 서명)."
+        )
+
+    has_course_labels = any(
+        "A코스" in menu.get("courses", {}) or "B코스" in menu.get("courses", {})
+        for menu in daily_menus.values()
+    )
+    if non_empty_days >= 3 and not has_course_labels:
+        warnings.append("A코스/B코스 라벨이 전혀 인식되지 않았습니다.")
+
+    # 아이템 총량이 비정상적으로 적으면 경고 (데이터 유실 가능성)
+    total_items = sum(item_counts.values())
+    if non_empty_days >= 3 and total_items < non_empty_days * 3:
+        warnings.append(
+            f"주간 전체 아이템 수가 비정상적으로 적습니다: {total_items}개"
+        )
+
+    return warnings, severe
+
+
+# ============================================================
 # 9. 결과 저장
 # ============================================================
 
@@ -1467,7 +1564,11 @@ def save_result(
         "period": period,
         "images": images,
         "daily_menus": daily_menus,
-        "menu_text": ocr_lines
+        "menu_text": ocr_lines,
+        # 마지막 성공 크롤링 시각 (UTC). /meal/refresh 쿨다운 판정에 사용된다.
+        "captured_at": datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat(),
     }
 
     # JSON
@@ -1762,6 +1863,26 @@ def main():
         all_lines,
         period
     )
+
+    # ----------------------------------------
+    # 파싱 품질 검증 (심각 이상 시 예외로 실패 처리)
+    # 저장은 먼저 수행해 로컬 디버깅을 가능하게 하고,
+    # CI에서는 이 예외로 커밋/푸시가 중단되며 실패 알림이 발생한다.
+    # ----------------------------------------
+
+    parse_warnings, severe_issues = validate_daily_menus(daily_menus)
+
+    for warning in parse_warnings:
+        print(f"[경고] {warning}")
+
+    if severe_issues:
+        for issue in severe_issues:
+            print(f"[치명] {issue}")
+
+        raise MenuQualityError(
+            "파싱 결과에 심각한 구조 이상이 있습니다: "
+            + " ".join(severe_issues)
+        )
 
     # ----------------------------------------
     # 최종 출력
